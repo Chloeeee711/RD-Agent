@@ -7,10 +7,14 @@ This will
 """
 
 import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv(".env")
+# Prefer a "clean" dotenv file when the repo's `.env` is a template containing non-dotenv syntax
+# (e.g. triple-quoted blocks). Fall back to `.env` for existing user setups.
+env_file = ".env.fixed" if Path(".env.fixed").exists() else ".env"
+load_dotenv(env_file)
 # 1) Make sure it is at the beginning of the script so that it will load dotenv before initializing BaseSettings.
 # 2) The ".env" argument is necessary to make sure it loads `.env` from the current directory.
 
