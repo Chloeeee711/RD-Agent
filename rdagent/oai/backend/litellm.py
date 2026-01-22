@@ -243,3 +243,70 @@ class LiteLLMAPIBackend(APIBackend):
             return max_input_tokens
         except Exception as e:
             return super().chat_token_limit
+
+
+# ============================================================================
+# 百炼兼容版本 Backend（DashScope OpenAI Compatible Mode）
+# ============================================================================
+# 说明：
+# - 保留原有的 LiteLLMAPIBackend（OpenAI 标准接口）
+# - 新增 LiteLLMDashScopeBackend，专门适配阿里云百炼的 OpenAI 兼容接口
+# - 主要区别：在调用 embedding 时，明确传递 encoding_format="float" 以兼容百炼
+# ============================================================================
+
+
+class LiteLLMDashScopeBackend(LiteLLMAPIBackend):
+    """
+    百炼（DashScope）兼容版本的 LiteLLM Backend
+    
+    继承自 LiteLLMAPIBackend，但重写了 embedding 方法以适配百炼的 OpenAI 兼容接口。
+    百炼要求 encoding_format 必须明确指定为 "float" 或 "base64"，否则会返回 400 错误。
+    
+    使用方法：
+    1. 在 .env 中设置：BACKEND=rdagent.oai.backend.litellm.LiteLLMDashScopeBackend
+    2. 确保 EMBEDDING_MODEL 使用百炼支持的模型（如 openai/text-embedding-v1）
+    """
+
+    def _create_embedding_inner_function(self, input_content_list: list[str]) -> list[list[float]]:
+        """
+        百炼兼容版本的 embedding 调用
+        
+        与父类的主要区别：
+        - 明确传递 encoding_format="float" 以符合百炼接口要求
+        - 百炼的 OpenAI 兼容接口要求 encoding_format 必须是 "float" 或 "base64"
+        """
+        model_name = LITELLM_SETTINGS.embedding_model
+        logger.info(
+            f"{LogColors.GREEN}Using DashScope-compatible emb model{LogColors.END} {model_name}",
+            tag="debug_litellm_emb",
+        )
+        if LITELLM_SETTINGS.log_llm_chat_content:
+            logger.info(
+                f"{LogColors.MAGENTA}Creating embedding (DashScope mode){LogColors.END} for: {input_content_list}",
+                tag="debug_litellm_emb",
+            )
+        
+        # 百炼兼容：明确传递 encoding_format="float"
+        # 根据百炼文档，encoding_format 只支持 "float" 或 "base64"
+        # 我们使用 "float" 因为这是最常见的格式
+        try:
+            response = embedding(
+                model=model_name,
+                input=input_content_list,
+                encoding_format="float",  # 百炼兼容：明确指定 encoding_format
+            )
+            response_list = [data["embedding"] for data in response.data]
+            return response_list
+        except Exception as e:
+            # 如果明确传递 encoding_format 还是失败，尝试不传（有些 litellm 版本可能自动处理）
+            logger.warning(
+                f"Embedding with encoding_format='float' failed, retrying without explicit encoding_format: {e}",
+                tag="debug_litellm_emb",
+            )
+            # 降级：不传 encoding_format，让 litellm 使用默认行为
+            response = embedding(
+                model=model_name,
+                input=input_content_list,
+            )
+            response_list = [data["embedding"] for data in response.data]
+            return response_list
