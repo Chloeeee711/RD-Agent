@@ -270,10 +270,11 @@ class LiteLLMDashScopeBackend(LiteLLMAPIBackend):
     def _create_embedding_inner_function(self, input_content_list: list[str]) -> list[list[float]]:
         """
         百炼兼容版本的 embedding 调用
-        
+
         与父类的主要区别：
         - 明确传递 encoding_format="float" 以符合百炼接口要求
-        - 百炼的 OpenAI 兼容接口要求 encoding_format 必须是 "float" 或 "base64"
+        - 遵守百炼的 batch 限制：一次最多 10 条（错误信息中明确指出）
+        - 如果 encoding_format 仍然报错，则退回到“不显式指定 encoding_format”的调用
         """
         model_name = LITELLM_SETTINGS.embedding_model
         logger.info(
@@ -282,31 +283,51 @@ class LiteLLMDashScopeBackend(LiteLLMAPIBackend):
         )
         if LITELLM_SETTINGS.log_llm_chat_content:
             logger.info(
-                f"{LogColors.MAGENTA}Creating embedding (DashScope mode){LogColors.END} for: {input_content_list}",
+                f"{LogColors.MAGENTA}Creating embedding (DashScope mode){LogColors.END} for "
+                f"{len(input_content_list)} texts",
                 tag="debug_litellm_emb",
             )
-        
-        # 百炼兼容：明确传递 encoding_format="float"
-        # 根据百炼文档，encoding_format 只支持 "float" 或 "base64"
-        # 我们使用 "float" 因为这是最常见的格式
-        try:
-            response = embedding(
-                model=model_name,
-                input=input_content_list,
-                encoding_format="float",  # 百炼兼容：明确指定 encoding_format
-            )
-            response_list = [data["embedding"] for data in response.data]
-            return response_list
-        except Exception as e:
-            # 如果明确传递 encoding_format 还是失败，尝试不传（有些 litellm 版本可能自动处理）
-            logger.warning(
-                f"Embedding with encoding_format='float' failed, retrying without explicit encoding_format: {e}",
-                tag="debug_litellm_emb",
-            )
-            # 降级：不传 encoding_format，让 litellm 使用默认行为
-            response = embedding(
-                model=model_name,
-                input=input_content_list,
-            )
-            response_list = [data["embedding"] for data in response.data]
-            return response_list
+
+        # 百炼限制：batch size 不能大于 10
+        max_batch_size = 10
+        batched_embeddings: list[list[float]] = []
+
+        for start in range(0, len(input_content_list), max_batch_size):
+            batch = input_content_list[start : start + max_batch_size]
+            if LITELLM_SETTINGS.log_llm_chat_content:
+                logger.info(
+                    f"{LogColors.MAGENTA}DashScope batch{LogColors.END} size={len(batch)} "
+                    f"({start}–{start + len(batch) - 1})",
+                    tag="debug_litellm_emb",
+                )
+
+            try:
+                # 首选：显式指定 encoding_format="float"
+                response = embedding(
+                    model=model_name,
+                    input=batch,
+                    encoding_format="float",
+                )
+            except BadRequestError as e:
+                # 1）如果是 batch size 相关错误，直接继续用更小 batch（我们已经按 10 切片，理论上不会再触发）
+                # 2）如果是 encoding_format 相关错误，则去掉 encoding_format 再试一次
+                logger.warning(
+                    f"Embedding with encoding_format='float' failed, "
+                    f"retrying without explicit encoding_format: {e}",
+                    tag="debug_litellm_emb",
+                )
+                response = embedding(
+                    model=model_name,
+                    input=batch,
+                )
+            except Exception as e:  # noqa: BLE001
+                # 其他异常直接向上抛，让上层的重试逻辑接管
+                logger.warning(
+                    f"Embedding batch failed with unexpected error, re-raising: {e}",
+                    tag="debug_litellm_emb",
+                )
+                raise
+
+            batched_embeddings.extend([data["embedding"] for data in response.data])
+
+        return batched_embeddings
